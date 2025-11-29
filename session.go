@@ -60,8 +60,12 @@ func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error
 
 	p := PacketCodec(pkt)
 
-	if NtStatus(p.Status()) != STATUS_MORE_PROCESSING_REQUIRED {
-		return nil, &InvalidResponseError{fmt.Sprintf("expected status: %v, got %v", STATUS_MORE_PROCESSING_REQUIRED, NtStatus(p.Status()))}
+	// Accept both STATUS_MORE_PROCESSING_REQUIRED (NTLM) and STATUS_SUCCESS (Kerberos)
+	// Kerberos can complete in one round-trip, while NTLM requires two.
+	status := NtStatus(p.Status())
+
+	if status != STATUS_MORE_PROCESSING_REQUIRED && status != STATUS_SUCCESS {
+		return nil, &InvalidResponseError{fmt.Sprintf("expected status: %v or %v, got %v", STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS, status)}
 	}
 
 	res, err := accept(SMB2_SESSION_SETUP, pkt)
@@ -102,10 +106,13 @@ func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error
 			h.Write(rr.pkt)
 			h.Sum(s.preauthIntegrityHashValue[:0])
 
-			h.Reset()
-			h.Write(s.preauthIntegrityHashValue[:])
-			h.Write(pkt)
-			h.Sum(s.preauthIntegrityHashValue[:0])
+			// Only update hash with response if we need more processing
+			if status == STATUS_MORE_PROCESSING_REQUIRED {
+				h.Reset()
+				h.Write(s.preauthIntegrityHashValue[:])
+				h.Write(pkt)
+				h.Sum(s.preauthIntegrityHashValue[:0])
+			}
 		}
 
 	}
@@ -115,17 +122,20 @@ func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error
 		return nil, &InvalidResponseError{err.Error()}
 	}
 
-	req.SecurityBuffer = outputToken
-
-	req.CreditRequestResponse = 0
-
 	// We set session before sending packet just for setting hdr.SessionId.
 	// But, we should not permit access from receiver until the session information is completed.
 	conn.session = s
 
-	rr, err = s.send(req, ctx)
-	if err != nil {
-		return nil, err
+	// Only send second SessionSetup if server requires more processing (NTLM flow)
+	// Kerberos can complete in one round-trip with STATUS_SUCCESS
+	if status == STATUS_MORE_PROCESSING_REQUIRED {
+		req.SecurityBuffer = outputToken
+		req.CreditRequestResponse = 0
+
+		rr, err = s.send(req, ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if s.sessionFlags&(SMB2_SESSION_FLAG_IS_GUEST|SMB2_SESSION_FLAG_IS_NULL) == 0 {
@@ -168,12 +178,15 @@ func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error
 				return nil, &InternalError{err.Error()}
 			}
 		case SMB311:
-			switch conn.preauthIntegrityHashId {
-			case SHA512:
-				h := sha512.New()
-				h.Write(s.preauthIntegrityHashValue[:])
-				h.Write(rr.pkt)
-				h.Sum(s.preauthIntegrityHashValue[:0])
+			// Only update preauth hash if we sent a second request
+			if status == STATUS_MORE_PROCESSING_REQUIRED {
+				switch conn.preauthIntegrityHashId {
+				case SHA512:
+					h := sha512.New()
+					h.Write(s.preauthIntegrityHashValue[:])
+					h.Write(rr.pkt)
+					h.Sum(s.preauthIntegrityHashValue[:0])
+				}
 			}
 
 			signingKey := kdf(sessionKey, []byte("SMBSigningKey\x00"), s.preauthIntegrityHashValue[:])
@@ -230,26 +243,29 @@ func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error
 		}
 	}
 
-	pkt, err = s.recv(rr)
-	if err != nil {
-		return nil, err
-	}
+	// Only receive second response if we sent a second request (NTLM flow)
+	if status == STATUS_MORE_PROCESSING_REQUIRED {
+		pkt, err = s.recv(rr)
+		if err != nil {
+			return nil, err
+		}
 
-	res, err = accept(SMB2_SESSION_SETUP, pkt)
-	if err != nil {
-		return nil, err
-	}
+		res, err = accept(SMB2_SESSION_SETUP, pkt)
+		if err != nil {
+			return nil, err
+		}
 
-	r = SessionSetupResponseDecoder(res)
-	if r.IsInvalid() {
-		return nil, &InvalidResponseError{"broken session setup response format"}
-	}
+		r = SessionSetupResponseDecoder(res)
+		if r.IsInvalid() {
+			return nil, &InvalidResponseError{"broken session setup response format"}
+		}
 
-	if NtStatus(PacketCodec(pkt).Status()) != STATUS_SUCCESS {
-		return nil, &InvalidResponseError{"broken session setup response format"}
-	}
+		if NtStatus(PacketCodec(pkt).Status()) != STATUS_SUCCESS {
+			return nil, &InvalidResponseError{"session setup failed"}
+		}
 
-	s.sessionFlags = r.SessionFlags()
+		s.sessionFlags = r.SessionFlags()
+	}
 
 	// now, allow access from receiver
 	s.enableSession()
