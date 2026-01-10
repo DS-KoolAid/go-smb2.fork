@@ -19,6 +19,16 @@ import (
 	"github.com/oiweiwei/go-smb2.fork/internal/msrpc"
 )
 
+// SecurityInformationRequestFlags specifies which security descriptor components to query.
+type SecurityInformationRequestFlags uint32
+
+const (
+	OwnerSecurityInformation SecurityInformationRequestFlags = 0x00000001
+	GroupSecurityInformation SecurityInformationRequestFlags = 0x00000002
+	DACLSecurityInformation  SecurityInformationRequestFlags = 0x00000004
+	SACLSecurityInformation  SecurityInformationRequestFlags = 0x00000008 // requires ACCESS_SYSTEM_SECURITY
+)
+
 // Dialer contains options for func (*Dialer) Dial.
 type Dialer struct {
 	MaxCreditBalance uint16 // if it's zero, clientMaxCreditBalance is used. (See feature.go for more details)
@@ -680,6 +690,45 @@ func (fs *Share) Stat(name string) (os.FileInfo, error) {
 	}
 
 	return fi, nil
+}
+
+// SecurityInfoRaw returns the raw security descriptor bytes for the named file or directory.
+func (fs *Share) SecurityInfoRaw(name string, info SecurityInformationRequestFlags) ([]byte, error) {
+	const op = "secinfo"
+	name = normPath(name)
+
+	if err := validatePath(op, name, false); err != nil {
+		return nil, err
+	}
+
+	if info == 0 {
+		return nil, &os.PathError{Op: op, Path: name, Err: os.ErrInvalid}
+	}
+
+	var access uint32 = READ_CONTROL
+	if info&SACLSecurityInformation != 0 {
+		access |= ACCESS_SYSTEM_SECURITY
+	}
+
+	create := &CreateRequest{
+		SecurityFlags:        0,
+		RequestedOplockLevel: SMB2_OPLOCK_LEVEL_NONE,
+		ImpersonationLevel:   Impersonation,
+		SmbCreateFlags:       0,
+		DesiredAccess:        access,
+		FileAttributes:       FILE_ATTRIBUTE_NORMAL,
+		ShareAccess:          FILE_SHARE_READ,
+		CreateDisposition:    FILE_OPEN,
+		CreateOptions:        0,
+	}
+
+	f, err := fs.createFile(name, create, true)
+	if err != nil {
+		return nil, &os.PathError{Op: op, Path: name, Err: err}
+	}
+	defer f.close()
+
+	return f.SecurityInfoRaw(info)
 }
 
 func (fs *Share) Truncate(name string, size int64) error {
@@ -2063,6 +2112,28 @@ func (f *File) queryInfo(req *QueryInfoRequest) (infoBytes []byte, err error) {
 	}
 
 	return r.OutputBuffer(), nil
+}
+
+// SecurityInfoRaw returns the raw security descriptor bytes for the file.
+func (f *File) SecurityInfoRaw(info SecurityInformationRequestFlags) ([]byte, error) {
+	if info == 0 {
+		return nil, &os.PathError{Op: "secinfo", Path: f.name, Err: os.ErrInvalid}
+	}
+
+	req := &QueryInfoRequest{
+		InfoType:              SMB2_0_INFO_SECURITY,
+		FileInfoClass:         0,
+		OutputBufferLength:    64 * 1024,
+		AdditionalInformation: uint32(info),
+		Flags:                 0,
+	}
+
+	infoBytes, err := f.queryInfo(req)
+	if err != nil {
+		return nil, &os.PathError{Op: "secinfo", Path: f.name, Err: err}
+	}
+
+	return infoBytes, nil
 }
 
 func (f *File) setInfo(req *SetInfoRequest) (err error) {
