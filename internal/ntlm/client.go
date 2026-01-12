@@ -22,8 +22,8 @@ type Client struct {
 	Domain      string // e.g "WORKGROUP", "MicrosoftAccount"
 	Workstation string // e.g "localhost", "HOME-PC"
 
-	TargetSPN       string           // SPN ::= "service/hostname[:port]"; e.g "cifs/remotehost:1020"
-	channelBindings *channelBindings // reserved for future implementation
+	TargetSPN           string // SPN ::= "service/hostname[:port]"; e.g "cifs/remotehost:1020"
+	ChannelBindingToken []byte // 16-byte EPA channel binding token
 
 	nmsg    []byte
 	session *Session
@@ -109,7 +109,7 @@ func (c *Client) Authenticate(cmsg []byte) (amsg []byte, err error) {
 		return nil, errors.New("invalid target info format")
 	}
 	targetInfo := cmsg[targetInfoBufferOffset : targetInfoBufferOffset+uint32(targetInfoLen)] // cmsg.TargetInfo
-	info := newTargetInfoEncoder(targetInfo, utf16le.EncodeStringToBytes(c.TargetSPN))
+	info := newTargetInfoEncoder(targetInfo, utf16le.EncodeStringToBytes(c.TargetSPN), c.ChannelBindingToken)
 	if info == nil {
 		return nil, errors.New("invalid target info format")
 	}

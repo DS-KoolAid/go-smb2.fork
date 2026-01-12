@@ -60,6 +60,12 @@ func (d *Dialer) DialContext(ctx context.Context, tcpConn net.Conn) (*Session, e
 		if i.User == "" {
 			return nil, &InternalError{"Anonymous account is not supported yet. Use guest account instead"}
 		}
+		// Auto-compute EPA channel binding token if connection is TLS and no token provided
+		if len(i.ChannelBindingToken) == 0 {
+			if token := ComputeChannelBindingFromConn(tcpConn); token != nil {
+				i.ChannelBindingToken = token
+			}
+		}
 	}
 
 	maxCreditBalance := d.MaxCreditBalance

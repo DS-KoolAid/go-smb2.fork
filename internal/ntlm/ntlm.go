@@ -174,20 +174,22 @@ func (b bytesEncoder) encode(bs []byte) {
 }
 
 type targetInfoEncoder struct {
-	Info    []byte
-	SPN     []byte
-	InfoMap map[uint16][]byte
+	Info                []byte
+	SPN                 []byte
+	ChannelBindingToken []byte
+	InfoMap             map[uint16][]byte
 }
 
-func newTargetInfoEncoder(info, spn []byte) *targetInfoEncoder {
+func newTargetInfoEncoder(info, spn, channelBindingToken []byte) *targetInfoEncoder {
 	infoMap, ok := parseAvPairs(info)
 	if !ok {
 		return nil
 	}
 	return &targetInfoEncoder{
-		Info:    info,
-		SPN:     spn,
-		InfoMap: infoMap,
+		Info:                info,
+		SPN:                 spn,
+		ChannelBindingToken: channelBindingToken,
+		InfoMap:             infoMap,
 	}
 }
 
@@ -222,6 +224,10 @@ func (i *targetInfoEncoder) encode(dst []byte) {
 
 	le.PutUint16(dst[off:off+2], MsvAvChannelBindings)
 	le.PutUint16(dst[off+2:off+4], 16)
+	if len(i.ChannelBindingToken) == 16 {
+		copy(dst[off+4:off+20], i.ChannelBindingToken)
+	}
+	// else: remains zeros (backward compatible)
 
 	off += 20
 
